@@ -195,9 +195,12 @@ class TradingMarket(Page):
                   f"現金={player.current_cash}, {C.ITEM_NAME}={player.current_items}")
             
             # 使用統一的 process_new_order 函數
-            result = process_new_order(
-                player, group, direction, price, quantity, 
-                C.ITEM_NAME, 'current_items'
+            result = run_with_group_lock(
+                player,
+                lambda: process_new_order(
+                    player, group, direction, price, quantity,
+                    C.ITEM_NAME, 'current_items'
+                )
             )
             
             # 處理通知
@@ -234,9 +237,12 @@ class TradingMarket(Page):
                   f"對象玩家={target_id}, 價格={price}, 數量={quantity}")
             
             # 使用統一的 process_accept_offer 函數
-            result = process_accept_offer(
-                player, group, offer_type, target_id, price, quantity,
-                C.ITEM_NAME, 'current_items'
+            result = run_with_group_lock(
+                player,
+                lambda: process_accept_offer(
+                    player, group, offer_type, target_id, price, quantity,
+                    C.ITEM_NAME, 'current_items'
+                )
             )
                     
             # 處理通知
@@ -267,7 +273,10 @@ class TradingMarket(Page):
                   f"價格={price}, 數量={quantity}")
             
             # 取消訂單
-            cancel_specific_order(group, player.id_in_group, direction, price, quantity)
+            run_with_group_lock(
+                player,
+                lambda: cancel_specific_order(group, player.id_in_group, direction, price, quantity)
+            )
             
             return {p.id_in_group: TradingMarket.market_state(p) 
                     for p in group.get_players()}
