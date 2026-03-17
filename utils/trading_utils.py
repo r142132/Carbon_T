@@ -5,6 +5,7 @@ from otree.api import *
 import json
 import time
 from typing import Dict, List, Any, Tuple, Optional
+import inspect
 try:
     from django.db import transaction
 except ModuleNotFoundError:
@@ -44,9 +45,20 @@ def run_with_group_lock(player: BasePlayer, operation):
     """
     with transaction.atomic():
         group = player.group
-        type(group).objects.select_for_update().get(pk=group.pk)
-        group.refresh_from_db(fields=['buy_orders', 'sell_orders'])
-        player.refresh_from_db()
+
+        # 重新抓取並鎖定 group，避免操作舊的 in-memory 物件造成資料覆寫
+        locked_group = type(group).objects.select_for_update().get(pk=group.pk)
+        locked_group.refresh_from_db(fields=['buy_orders', 'sell_orders'])
+
+        locked_player = type(player).objects.select_for_update().get(pk=player.pk)
+        locked_player.refresh_from_db()
+
+        # 向下相容：舊 callback 不帶參數，新 callback 可收 (player, group)
+        callback_arg_count = len(inspect.signature(operation).parameters)
+        if callback_arg_count >= 2:
+            return operation(locked_player, locked_group)
+        if callback_arg_count == 1:
+            return operation(locked_group)
         return operation()
 
 def update_price_history(
