@@ -5,6 +5,22 @@ from otree.api import *
 import json
 import time
 from typing import Dict, List, Any, Tuple, Optional
+import importlib.util
+from contextlib import nullcontext
+
+if importlib.util.find_spec("django") is not None:
+    from django.db import transaction
+    from django.db.utils import NotSupportedError
+else:
+    class NotSupportedError(Exception):
+        pass
+
+    class _FallbackTransaction:
+        @staticmethod
+        def atomic():
+            return nullcontext()
+
+    transaction = _FallbackTransaction()
 
 class TradingError(Exception):
     """交易錯誤的基礎類別"""
@@ -21,6 +37,28 @@ class InvalidOrderError(TradingError):
 class DuplicateOrderError(TradingError):
     """重複訂單錯誤"""
     pass
+
+
+def run_with_group_lock(player: BasePlayer, operation):
+    """
+    在資料庫交易中以 group row lock 執行交易操作，避免同秒併發重複撮合。
+
+    Args:
+        player: 發送請求的玩家
+        operation: 接受 locked group 參數的 callable
+    """
+    with transaction.atomic():
+        group_model = type(player.group)
+        group_id = player.group_id
+
+        try:
+            locked_group = group_model.objects.select_for_update().get(pk=group_id)
+        except NotSupportedError:
+            # SQLite 等資料庫可能不支援 FOR UPDATE；退化為同交易區段讀取。
+            locked_group = group_model.objects.get(pk=group_id)
+
+        player.refresh_from_db()
+        return operation(locked_group)
 
 def update_price_history(
     subsession: BaseSubsession, 
@@ -304,6 +342,11 @@ def execute_trade(
     """
     # 確保價格為整數
     price = int(price)
+
+    # 交易前最後防線：避免庫存變負數
+    current_seller_items = getattr(seller, item_field)
+    if current_seller_items < quantity:
+        raise InsufficientResourcesError('賣方持有數量不足，無法完成交易')
     
     # 更新現金
     buyer.current_cash -= price * quantity
@@ -311,7 +354,6 @@ def execute_trade(
     
     # 更新物品數量
     current_buyer_items = getattr(buyer, item_field)
-    current_seller_items = getattr(seller, item_field)
     setattr(buyer, item_field, current_buyer_items + quantity)
     setattr(seller, item_field, current_seller_items - quantity)
     
