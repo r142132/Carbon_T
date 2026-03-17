@@ -5,15 +5,10 @@ from otree.api import *
 import json
 import time
 from typing import Dict, List, Any, Tuple, Optional
-import importlib.util
-from contextlib import nullcontext
-
-if importlib.util.find_spec("django") is not None:
+try:
     from django.db import transaction
-    from django.db.utils import NotSupportedError
-else:
-    class NotSupportedError(Exception):
-        pass
+except ModuleNotFoundError:
+    from contextlib import nullcontext
 
     class _FallbackTransaction:
         @staticmethod
@@ -45,20 +40,14 @@ def run_with_group_lock(player: BasePlayer, operation):
 
     Args:
         player: 發送請求的玩家
-        operation: 接受 locked group 參數的 callable
+        operation: 不帶參數的 callable，會在鎖住 group 後執行
     """
     with transaction.atomic():
-        group_model = type(player.group)
-        group_id = player.group_id
-
-        try:
-            locked_group = group_model.objects.select_for_update().get(pk=group_id)
-        except NotSupportedError:
-            # SQLite 等資料庫可能不支援 FOR UPDATE；退化為同交易區段讀取。
-            locked_group = group_model.objects.get(pk=group_id)
-
+        group = player.group
+        type(group).objects.select_for_update().get(pk=group.pk)
+        group.refresh_from_db(fields=['buy_orders', 'sell_orders'])
         player.refresh_from_db()
-        return operation(locked_group)
+        return operation()
 
 def update_price_history(
     subsession: BaseSubsession, 
