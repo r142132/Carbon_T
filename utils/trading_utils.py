@@ -5,6 +5,17 @@ from otree.api import *
 import json
 import time
 from typing import Dict, List, Any, Tuple, Optional
+try:
+    from django.db import transaction
+except ModuleNotFoundError:
+    from contextlib import nullcontext
+
+    class _FallbackTransaction:
+        @staticmethod
+        def atomic():
+            return nullcontext()
+
+    transaction = _FallbackTransaction()
 
 class TradingError(Exception):
     """交易錯誤的基礎類別"""
@@ -21,6 +32,22 @@ class InvalidOrderError(TradingError):
 class DuplicateOrderError(TradingError):
     """重複訂單錯誤"""
     pass
+
+
+def run_with_group_lock(player: BasePlayer, operation):
+    """
+    在資料庫交易中以 group row lock 執行交易操作，避免同秒併發重複撮合。
+
+    Args:
+        player: 發送請求的玩家
+        operation: 不帶參數的 callable，會在鎖住 group 後執行
+    """
+    with transaction.atomic():
+        group = player.group
+        type(group).objects.select_for_update().get(pk=group.pk)
+        group.refresh_from_db(fields=['buy_orders', 'sell_orders'])
+        player.refresh_from_db()
+        return operation()
 
 def update_price_history(
     subsession: BaseSubsession, 
@@ -304,6 +331,11 @@ def execute_trade(
     """
     # 確保價格為整數
     price = int(price)
+
+    # 交易前最後防線：避免庫存變負數
+    current_seller_items = getattr(seller, item_field)
+    if current_seller_items < quantity:
+        raise InsufficientResourcesError('賣方持有數量不足，無法完成交易')
     
     # 更新現金
     buyer.current_cash -= price * quantity
@@ -311,7 +343,6 @@ def execute_trade(
     
     # 更新物品數量
     current_buyer_items = getattr(buyer, item_field)
-    current_seller_items = getattr(seller, item_field)
     setattr(buyer, item_field, current_buyer_items + quantity)
     setattr(seller, item_field, current_seller_items - quantity)
     
@@ -547,8 +578,22 @@ def process_accept_offer(
     price = int(price)
     
     try:
+        buy_orders, sell_orders = parse_orders(group)
+
         if offer_type == 'sell':
             # 接受賣單（玩家是買方）
+            order_exists = any(
+                int(o[0]) == target_id and float(o[1]) == price and int(o[2]) == quantity
+                for o in sell_orders
+            )
+            if not order_exists:
+                return {
+                    'type': 'fail',
+                    'notifications': {
+                        player.id_in_group: '交易失敗：該賣單已成交或已取消，請重新整理後再試'
+                    }
+                }
+
             seller = group.get_player_by_id(target_id)
             execute_trade(group, player, seller, price, quantity, item_field)
             
@@ -557,7 +602,6 @@ def process_accept_offer(
             cancel_player_orders(group, target_id, 'sell')
             
             # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
             sell_orders = [o for o in sell_orders if not (
                 int(o[0]) == target_id and 
                 float(o[1]) == price and 
@@ -576,6 +620,18 @@ def process_accept_offer(
             
         else:  # offer_type == 'buy'
             # 接受買單（玩家是賣方）
+            order_exists = any(
+                int(o[0]) == target_id and float(o[1]) == price and int(o[2]) == quantity
+                for o in buy_orders
+            )
+            if not order_exists:
+                return {
+                    'type': 'fail',
+                    'notifications': {
+                        player.id_in_group: '交易失敗：該買單已成交或已取消，請重新整理後再試'
+                    }
+                }
+
             # 先驗證賣方有足夠的物品
             current_items = getattr(player, item_field)
             if current_items < quantity:
@@ -594,7 +650,6 @@ def process_accept_offer(
             cancel_player_orders(group, player.id_in_group, 'sell')
             
             # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
             buy_orders = [o for o in buy_orders if not (
                 int(o[0]) == target_id and 
                 float(o[1]) == price and 
