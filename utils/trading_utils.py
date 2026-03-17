@@ -3,6 +3,7 @@
 """
 from otree.api import *
 import json
+import random
 import time
 from typing import Dict, List, Any, Tuple, Optional
 
@@ -180,6 +181,41 @@ def save_orders(group: BaseGroup, buy_orders: List[List], sell_orders: List[List
     """儲存買賣訂單"""
     group.buy_orders = json.dumps(buy_orders)
     group.sell_orders = json.dumps(sell_orders)
+
+
+def _order_second(order: List[Any]) -> int:
+    """取得訂單的秒級時間戳（支援 MM:SS 字串或整數秒戳）"""
+    if len(order) < 4:
+        return 0
+
+    raw_timestamp = order[3]
+    if isinstance(raw_timestamp, (int, float)):
+        return int(raw_timestamp)
+
+    if isinstance(raw_timestamp, str):
+        if ':' in raw_timestamp:
+            try:
+                minutes, seconds = raw_timestamp.split(':', 1)
+                return int(minutes) * 60 + int(seconds)
+            except ValueError:
+                return 0
+        try:
+            return int(float(raw_timestamp))
+        except ValueError:
+            return 0
+
+    return 0
+
+
+def _pick_order_with_same_second_random(candidates: List[Tuple[int, List[Any]]]) -> Tuple[int, List[Any]]:
+    """在候選中先取最早秒，再對同秒訂單隨機挑一筆"""
+    earliest_second = min(_order_second(order) for _, order in candidates)
+    same_second_candidates = [
+        (idx, order) for idx, order in candidates
+        if _order_second(order) == earliest_second
+    ]
+    random.shuffle(same_second_candidates)
+    return same_second_candidates[0]
 
 def check_duplicate_order(
     orders: List[List],
@@ -420,8 +456,19 @@ def process_new_order(
         )
         
         if matching_orders:
-            # 找到最低價格的匹配賣單
-            best_idx, best_order = min(matching_orders, key=lambda x: float(x[1][1]))
+            # 先維持價格優先：找到最低價格的匹配賣單集合
+            best_price = min(float(order[1]) for _, order in matching_orders)
+            best_price_candidates = [
+                (idx, order) for idx, order in matching_orders
+                if float(order[1]) == best_price
+            ]
+
+            if len(best_price_candidates) == 1:
+                best_idx, best_order = best_price_candidates[0]
+            else:
+                # 同價時：先取最早秒，再同秒隨機選一筆
+                best_idx, best_order = _pick_order_with_same_second_random(best_price_candidates)
+
             seller_id = int(best_order[0])
             
             try:
@@ -457,7 +504,12 @@ def process_new_order(
                 # 繼續添加訂單
         
         # 沒有匹配或執行失敗，添加新買單
-        buy_orders.append([player.id_in_group, price, quantity])
+        buy_orders.append([
+            player.id_in_group,
+            price,
+            quantity,
+            _calculate_timestamp(group.subsession)
+        ])
         save_orders(group, buy_orders, sell_orders)
         
     else:  # sell
@@ -466,8 +518,19 @@ def process_new_order(
         )
         
         if matching_orders:
-            # 找到最高價格的匹配買單
-            best_idx, best_order = max(matching_orders, key=lambda x: float(x[1][1]))
+            # 先維持價格優先：找到最高價格的匹配買單集合
+            best_price = max(float(order[1]) for _, order in matching_orders)
+            best_price_candidates = [
+                (idx, order) for idx, order in matching_orders
+                if float(order[1]) == best_price
+            ]
+
+            if len(best_price_candidates) == 1:
+                best_idx, best_order = best_price_candidates[0]
+            else:
+                # 同價時：先取最早秒，再同秒隨機選一筆
+                best_idx, best_order = _pick_order_with_same_second_random(best_price_candidates)
+
             buyer_id = int(best_order[0])
             
             try:
@@ -503,7 +566,12 @@ def process_new_order(
                 # 繼續添加訂單
         
         # 沒有匹配或執行失敗，添加新賣單
-        sell_orders.append([player.id_in_group, price, quantity])
+        sell_orders.append([
+            player.id_in_group,
+            price,
+            quantity,
+            _calculate_timestamp(group.subsession)
+        ])
         save_orders(group, buy_orders, sell_orders)
     
     print(f"成功添加{direction}單: 玩家{player.id_in_group}, 價格{price}, 數量{quantity}")
