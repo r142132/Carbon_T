@@ -515,6 +515,11 @@ class TradingMarket(Page):
                         }
                     market_states[p.id_in_group] = state
                 return market_states
+            elif result.get('update_all'):
+                return {p.id_in_group: TradingMarket.market_state(p)
+                        for p in group.get_players()}
+            else:
+                return result
         
         # 處理接受訂單
         elif data.get('type') == 'accept_offer':

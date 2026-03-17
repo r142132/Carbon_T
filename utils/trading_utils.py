@@ -578,8 +578,22 @@ def process_accept_offer(
     price = int(price)
     
     try:
+        buy_orders, sell_orders = parse_orders(group)
+
         if offer_type == 'sell':
             # 接受賣單（玩家是買方）
+            order_exists = any(
+                int(o[0]) == target_id and float(o[1]) == price and int(o[2]) == quantity
+                for o in sell_orders
+            )
+            if not order_exists:
+                return {
+                    'type': 'fail',
+                    'notifications': {
+                        player.id_in_group: '交易失敗：該賣單已成交或已取消，請重新整理後再試'
+                    }
+                }
+
             seller = group.get_player_by_id(target_id)
             execute_trade(group, player, seller, price, quantity, item_field)
             
@@ -588,7 +602,6 @@ def process_accept_offer(
             cancel_player_orders(group, target_id, 'sell')
             
             # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
             sell_orders = [o for o in sell_orders if not (
                 int(o[0]) == target_id and 
                 float(o[1]) == price and 
@@ -607,6 +620,18 @@ def process_accept_offer(
             
         else:  # offer_type == 'buy'
             # 接受買單（玩家是賣方）
+            order_exists = any(
+                int(o[0]) == target_id and float(o[1]) == price and int(o[2]) == quantity
+                for o in buy_orders
+            )
+            if not order_exists:
+                return {
+                    'type': 'fail',
+                    'notifications': {
+                        player.id_in_group: '交易失敗：該買單已成交或已取消，請重新整理後再試'
+                    }
+                }
+
             # 先驗證賣方有足夠的物品
             current_items = getattr(player, item_field)
             if current_items < quantity:
@@ -625,7 +650,6 @@ def process_accept_offer(
             cancel_player_orders(group, player.id_in_group, 'sell')
             
             # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
             buy_orders = [o for o in buy_orders if not (
                 int(o[0]) == target_id and 
                 float(o[1]) == price and 
