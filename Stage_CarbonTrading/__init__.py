@@ -492,8 +492,8 @@ class TradingMarket(Page):
             # 修改：使用統一的 process_new_order 函數
             result = run_with_group_lock(
                 player,
-                lambda: process_new_order(
-                    player, group, direction, price, quantity,
+                lambda locked_player, locked_group: process_new_order(
+                    locked_player, locked_group, direction, price, quantity,
                     "碳權", 'current_permits'  # 使用碳權相關參數
                 )
             )
@@ -534,8 +534,8 @@ class TradingMarket(Page):
             # 修改：使用統一的 process_accept_offer 函數
             result = run_with_group_lock(
                 player,
-                lambda: process_accept_offer(
-                    player, group, offer_type, target_id, price, quantity,
+                lambda locked_player, locked_group: process_accept_offer(
+                    locked_player, locked_group, offer_type, target_id, price, quantity,
                     "碳權", 'current_permits'  # 使用碳權相關參數
                 )
             )
@@ -570,7 +570,9 @@ class TradingMarket(Page):
             # 取消訂單
             run_with_group_lock(
                 player,
-                lambda: cancel_specific_order(group, player.id_in_group, direction, price, quantity)
+                lambda locked_player, locked_group: cancel_specific_order(
+                    locked_group, locked_player.id_in_group, direction, price, quantity
+                )
             )
             
             return {p.id_in_group: TradingMarket.market_state(p) 
