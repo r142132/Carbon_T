@@ -5,7 +5,18 @@ from otree.api import *
 import json
 import random
 import time
+from contextlib import nullcontext
 from typing import Dict, List, Any, Tuple, Optional
+
+try:
+    from django.db import transaction
+except ModuleNotFoundError:
+    class _FallbackTransaction:
+        @staticmethod
+        def atomic():
+            return nullcontext()
+
+    transaction = _FallbackTransaction()
 
 class TradingError(Exception):
     """交易錯誤的基礎類別"""
@@ -22,6 +33,62 @@ class InvalidOrderError(TradingError):
 class DuplicateOrderError(TradingError):
     """重複訂單錯誤"""
     pass
+
+
+def _locked_group_and_player(
+    player: BasePlayer,
+    group: BaseGroup,
+) -> Tuple[BasePlayer, BaseGroup]:
+    """鎖定目前玩家與所屬 group，避免併發撮合重複成交。"""
+    locked_group = group.__class__.objects.select_for_update().get(pk=group.pk)
+    locked_player = player.__class__.objects.select_for_update().get(pk=player.pk)
+
+    if hasattr(group, 'subsession') and getattr(group, 'subsession', None) is not None:
+        locked_subsession = group.subsession.__class__.objects.select_for_update().get(
+            pk=group.subsession.pk
+        )
+        locked_group.subsession = locked_subsession
+
+    return locked_player, locked_group
+
+
+def _locked_player_by_id(
+    player_model: type,
+    group: BaseGroup,
+    player_id: int,
+) -> BasePlayer:
+    """以 id_in_group 鎖定同組玩家。"""
+    return player_model.objects.select_for_update().get(
+        group=group,
+        id_in_group=player_id,
+    )
+
+
+def _persist_trade_models(group: BaseGroup, *players: BasePlayer) -> None:
+    """儲存交易過程中被更新的資料列。"""
+    for participant in players:
+        participant.save()
+
+    group.save()
+    if hasattr(group, 'subsession') and getattr(group, 'subsession', None) is not None:
+        group.subsession.save()
+
+
+def _order_exists(
+    orders: List[List[Any]],
+    player_id: int,
+    price: float,
+    quantity: int,
+) -> bool:
+    """檢查指定訂單是否仍存在於目前 order book。"""
+    for order in orders:
+        if (
+            int(order[0]) == int(player_id)
+            and float(order[1]) == float(price)
+            and int(order[2]) == int(quantity)
+        ):
+            return True
+    return False
 
 def update_price_history(
     subsession: BaseSubsession, 
@@ -414,166 +481,166 @@ def process_new_order(
     Returns:
         需要廣播給所有玩家的狀態更新
     """
-    # 驗證訂單
-    try:
-        validate_order(player, direction, price, quantity, item_name)
-    except TradingError as e:
-        return {
-            'type': 'fail',
-            'notifications': {
-                player.id_in_group: str(e)
-            }
-        }
-    
-    # 解析現有訂單
-    buy_orders, sell_orders = parse_orders(group)
-    
-    # 檢查重複訂單
-    if direction == 'buy':
-        if check_duplicate_order(buy_orders, price, quantity):
+    with transaction.atomic():
+        locked_player, locked_group = _locked_group_and_player(player, group)
+
+        # 驗證訂單
+        try:
+            validate_order(locked_player, direction, price, quantity, item_name)
+        except TradingError as e:
             return {
                 'type': 'fail',
                 'notifications': {
-                    player.id_in_group: f'市場上已有價格 {price} 且數量 {quantity} 的買單！'
+                    player.id_in_group: str(e)
                 }
             }
-    else:  # sell
-        if check_duplicate_order(sell_orders, price, quantity):
-            return {
-                'type': 'fail',
-                'notifications': {
-                    player.id_in_group: f'市場上已有價格 {price} 且數量 {quantity} 的賣單！'
-                }
-            }
-    
-    # 移除：不再自動取消之前的同方向訂單，允許掛多個買單/賣單
-    # cancel_player_orders(group, player.id_in_group, direction)
-    
-    # 尋找匹配的訂單
-    if direction == 'buy':
-        matching_orders = find_matching_orders(
-            sell_orders, player.id_in_group, price, quantity, True
-        )
-        
-        if matching_orders:
-            # 先維持價格優先：找到最低價格的匹配賣單集合
-            best_price = min(float(order[1]) for _, order in matching_orders)
-            best_price_candidates = [
-                (idx, order) for idx, order in matching_orders
-                if float(order[1]) == best_price
-            ]
 
-            if len(best_price_candidates) == 1:
-                best_idx, best_order = best_price_candidates[0]
-            else:
-                # 同價時：先取最早秒，再同秒隨機選一筆
-                best_idx, best_order = _pick_order_with_same_second_random(best_price_candidates)
+        # 解析現有訂單
+        buy_orders, sell_orders = parse_orders(locked_group)
 
-            seller_id = int(best_order[0])
-            
-            try:
-                seller = group.get_player_by_id(seller_id)
-                trade_price = int(float(best_order[1]))  # 確保交易價格為整數
-                execute_trade(group, player, seller, trade_price, quantity, item_field)
-                
-                # 保留：交易成功時取消雙方其他訂單
-                cancel_player_orders(group, player.id_in_group, 'buy')
-                cancel_player_orders(group, seller_id, 'sell')
-                
-                # 從賣單列表移除已成交的訂單
-                buy_orders, sell_orders = parse_orders(group)
-                sell_orders = [o for o in sell_orders if not (
-                    int(o[0]) == seller_id and 
-                    float(o[1]) == float(best_order[1]) and 
-                    int(o[2]) == int(best_order[2])
-                )]
-                save_orders(group, buy_orders, sell_orders)
-                
-                # 修改：添加自動交易成功通知，價格顯示為整數
+        # 檢查重複訂單
+        if direction == 'buy':
+            if check_duplicate_order(buy_orders, price, quantity):
                 return {
-                    'type': 'trade_executed', 
-                    'update_all': True,
+                    'type': 'fail',
                     'notifications': {
-                        player.id_in_group: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}',
-                        seller_id: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}'
+                        player.id_in_group: f'市場上已有價格 {price} 且數量 {quantity} 的買單！'
                     }
                 }
-                
-            except Exception as e:
-                print(f"交易執行失敗: {e}")
-                # 繼續添加訂單
-        
-        # 沒有匹配或執行失敗，添加新買單
-        buy_orders.append([
-            player.id_in_group,
-            price,
-            quantity,
-            _calculate_timestamp(group.subsession)
-        ])
-        save_orders(group, buy_orders, sell_orders)
-        
-    else:  # sell
-        matching_orders = find_matching_orders(
-            buy_orders, player.id_in_group, price, quantity, False
-        )
-        
-        if matching_orders:
-            # 先維持價格優先：找到最高價格的匹配買單集合
-            best_price = max(float(order[1]) for _, order in matching_orders)
-            best_price_candidates = [
-                (idx, order) for idx, order in matching_orders
-                if float(order[1]) == best_price
-            ]
-
-            if len(best_price_candidates) == 1:
-                best_idx, best_order = best_price_candidates[0]
-            else:
-                # 同價時：先取最早秒，再同秒隨機選一筆
-                best_idx, best_order = _pick_order_with_same_second_random(best_price_candidates)
-
-            buyer_id = int(best_order[0])
-            
-            try:
-                buyer = group.get_player_by_id(buyer_id)
-                trade_price = int(float(best_order[1]))  # 確保交易價格為整數
-                execute_trade(group, buyer, player, trade_price, quantity, item_field)
-                
-                # 保留：交易成功時取消雙方其他訂單
-                cancel_player_orders(group, buyer_id, 'buy')
-                cancel_player_orders(group, player.id_in_group, 'sell')
-                
-                # 從買單列表移除已成交的訂單
-                buy_orders, sell_orders = parse_orders(group)
-                buy_orders = [o for o in buy_orders if not (
-                    int(o[0]) == buyer_id and 
-                    float(o[1]) == float(best_order[1]) and 
-                    int(o[2]) == int(best_order[2])
-                )]
-                save_orders(group, buy_orders, sell_orders)
-                
-                # 修改：添加自動交易成功通知，價格顯示為整數
+        else:  # sell
+            if check_duplicate_order(sell_orders, price, quantity):
                 return {
-                    'type': 'trade_executed', 
-                    'update_all': True,
+                    'type': 'fail',
                     'notifications': {
-                        player.id_in_group: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}',
-                        buyer_id: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}'
+                        player.id_in_group: f'市場上已有價格 {price} 且數量 {quantity} 的賣單！'
                     }
                 }
-                
-            except Exception as e:
-                print(f"交易執行失敗: {e}")
-                # 繼續添加訂單
-        
-        # 沒有匹配或執行失敗，添加新賣單
-        sell_orders.append([
-            player.id_in_group,
-            price,
-            quantity,
-            _calculate_timestamp(group.subsession)
-        ])
-        save_orders(group, buy_orders, sell_orders)
-    
+
+        # 尋找匹配的訂單
+        if direction == 'buy':
+            matching_orders = find_matching_orders(
+                sell_orders, locked_player.id_in_group, price, quantity, True
+            )
+
+            if matching_orders:
+                # 先維持價格優先：找到最低價格的匹配賣單集合
+                best_price = min(float(order[1]) for _, order in matching_orders)
+                best_price_candidates = [
+                    (idx, order) for idx, order in matching_orders
+                    if float(order[1]) == best_price
+                ]
+
+                if len(best_price_candidates) == 1:
+                    _, best_order = best_price_candidates[0]
+                else:
+                    # 同價時：先取最早秒，再同秒隨機選一筆
+                    _, best_order = _pick_order_with_same_second_random(best_price_candidates)
+
+                seller_id = int(best_order[0])
+
+                try:
+                    seller = _locked_player_by_id(player.__class__, locked_group, seller_id)
+                    trade_price = int(float(best_order[1]))  # 確保交易價格為整數
+                    execute_trade(locked_group, locked_player, seller, trade_price, quantity, item_field)
+
+                    # 保留：交易成功時取消雙方其他訂單
+                    cancel_player_orders(locked_group, locked_player.id_in_group, 'buy')
+                    cancel_player_orders(locked_group, seller_id, 'sell')
+
+                    # 從賣單列表移除已成交的訂單
+                    buy_orders, sell_orders = parse_orders(locked_group)
+                    sell_orders = [o for o in sell_orders if not (
+                        int(o[0]) == seller_id and
+                        float(o[1]) == float(best_order[1]) and
+                        int(o[2]) == int(best_order[2])
+                    )]
+                    save_orders(locked_group, buy_orders, sell_orders)
+                    _persist_trade_models(locked_group, locked_player, seller)
+
+                    return {
+                        'type': 'trade_executed',
+                        'update_all': True,
+                        'notifications': {
+                            player.id_in_group: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}',
+                            seller_id: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}'
+                        }
+                    }
+
+                except Exception as e:
+                    print(f"交易執行失敗: {e}")
+
+            # 沒有匹配或執行失敗，添加新買單
+            buy_orders.append([
+                locked_player.id_in_group,
+                price,
+                quantity,
+                _calculate_timestamp(locked_group.subsession)
+            ])
+            save_orders(locked_group, buy_orders, sell_orders)
+            locked_group.save()
+
+        else:  # sell
+            matching_orders = find_matching_orders(
+                buy_orders, locked_player.id_in_group, price, quantity, False
+            )
+
+            if matching_orders:
+                # 先維持價格優先：找到最高價格的匹配買單集合
+                best_price = max(float(order[1]) for _, order in matching_orders)
+                best_price_candidates = [
+                    (idx, order) for idx, order in matching_orders
+                    if float(order[1]) == best_price
+                ]
+
+                if len(best_price_candidates) == 1:
+                    _, best_order = best_price_candidates[0]
+                else:
+                    # 同價時：先取最早秒，再同秒隨機選一筆
+                    _, best_order = _pick_order_with_same_second_random(best_price_candidates)
+
+                buyer_id = int(best_order[0])
+
+                try:
+                    buyer = _locked_player_by_id(player.__class__, locked_group, buyer_id)
+                    trade_price = int(float(best_order[1]))  # 確保交易價格為整數
+                    execute_trade(locked_group, buyer, locked_player, trade_price, quantity, item_field)
+
+                    # 保留：交易成功時取消雙方其他訂單
+                    cancel_player_orders(locked_group, buyer_id, 'buy')
+                    cancel_player_orders(locked_group, locked_player.id_in_group, 'sell')
+
+                    # 從買單列表移除已成交的訂單
+                    buy_orders, sell_orders = parse_orders(locked_group)
+                    buy_orders = [o for o in buy_orders if not (
+                        int(o[0]) == buyer_id and
+                        float(o[1]) == float(best_order[1]) and
+                        int(o[2]) == int(best_order[2])
+                    )]
+                    save_orders(locked_group, buy_orders, sell_orders)
+                    _persist_trade_models(locked_group, buyer, locked_player)
+
+                    return {
+                        'type': 'trade_executed',
+                        'update_all': True,
+                        'notifications': {
+                            player.id_in_group: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}',
+                            buyer_id: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}'
+                        }
+                    }
+
+                except Exception as e:
+                    print(f"交易執行失敗: {e}")
+
+            # 沒有匹配或執行失敗，添加新賣單
+            sell_orders.append([
+                locked_player.id_in_group,
+                price,
+                quantity,
+                _calculate_timestamp(locked_group.subsession)
+            ])
+            save_orders(locked_group, buy_orders, sell_orders)
+            locked_group.save()
+
     print(f"成功添加{direction}單: 玩家{player.id_in_group}, 價格{price}, 數量{quantity}")
     return {'type': 'order_added', 'update_all': True}
 
@@ -615,70 +682,91 @@ def process_accept_offer(
     price = int(price)
     
     try:
-        if offer_type == 'sell':
-            # 接受賣單（玩家是買方）
-            seller = group.get_player_by_id(target_id)
-            execute_trade(group, player, seller, price, quantity, item_field)
-            
-            # 保留：交易成功時取消雙方其他訂單
-            cancel_player_orders(group, player.id_in_group, 'buy')
-            cancel_player_orders(group, target_id, 'sell')
-            
-            # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
-            sell_orders = [o for o in sell_orders if not (
-                int(o[0]) == target_id and 
-                float(o[1]) == price and 
-                int(o[2]) == quantity
-            )]
-            save_orders(group, buy_orders, sell_orders)
-            
-            return {
-                'type': 'trade_executed',
-                'update_all': True,
-                'notifications': {
-                    player.id_in_group: f'交易成功：您以價格 {price} 買入了 {quantity} 個{item_name}',
-                    target_id: f'交易成功：您以價格 {price} 賣出了 {quantity} 個{item_name}'
-                }
-            }
-            
-        else:  # offer_type == 'buy'
-            # 接受買單（玩家是賣方）
-            # 先驗證賣方有足夠的物品
-            current_items = getattr(player, item_field)
-            if current_items < quantity:
+        with transaction.atomic():
+            locked_player, locked_group = _locked_group_and_player(player, group)
+            buy_orders, sell_orders = parse_orders(locked_group)
+
+            if offer_type == 'sell':
+                # 接受賣單（玩家是買方）
+                if not _order_exists(sell_orders, target_id, price, quantity):
+                    return {
+                        'type': 'fail',
+                        'notifications': {
+                            player.id_in_group: '交易失敗：該賣單已不存在'
+                        }
+                    }
+
+                seller = _locked_player_by_id(player.__class__, locked_group, target_id)
+                execute_trade(locked_group, locked_player, seller, price, quantity, item_field)
+
+                # 保留：交易成功時取消雙方其他訂單
+                cancel_player_orders(locked_group, locked_player.id_in_group, 'buy')
+                cancel_player_orders(locked_group, target_id, 'sell')
+
+                # 移除已成交的訂單
+                buy_orders, sell_orders = parse_orders(locked_group)
+                sell_orders = [o for o in sell_orders if not (
+                    int(o[0]) == target_id and
+                    float(o[1]) == price and
+                    int(o[2]) == quantity
+                )]
+                save_orders(locked_group, buy_orders, sell_orders)
+                _persist_trade_models(locked_group, locked_player, seller)
+
                 return {
-                    'type': 'fail',
+                    'type': 'trade_executed',
+                    'update_all': True,
                     'notifications': {
-                        player.id_in_group: f'您的{item_name}不足'
+                        player.id_in_group: f'交易成功：您以價格 {price} 買入了 {quantity} 個{item_name}',
+                        target_id: f'交易成功：您以價格 {price} 賣出了 {quantity} 個{item_name}'
                     }
                 }
-            
-            buyer = group.get_player_by_id(target_id)
-            execute_trade(group, buyer, player, price, quantity, item_field)
-            
-            # 保留：交易成功時取消雙方其他訂單
-            cancel_player_orders(group, target_id, 'buy')
-            cancel_player_orders(group, player.id_in_group, 'sell')
-            
-            # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
-            buy_orders = [o for o in buy_orders if not (
-                int(o[0]) == target_id and 
-                float(o[1]) == price and 
-                int(o[2]) == quantity
-            )]
-            save_orders(group, buy_orders, sell_orders)
-            
-            return {
-                'type': 'trade_executed',
-                'update_all': True,
-                'notifications': {
-                    player.id_in_group: f'交易成功：您以價格 {price} 賣出了 {quantity} 個{item_name}',
-                    target_id: f'交易成功：您以價格 {price} 買入了 {quantity} 個{item_name}'
+
+            else:  # offer_type == 'buy'
+                if not _order_exists(buy_orders, target_id, price, quantity):
+                    return {
+                        'type': 'fail',
+                        'notifications': {
+                            player.id_in_group: '交易失敗：該買單已不存在'
+                        }
+                    }
+
+                # 接受買單（玩家是賣方）
+                current_items = getattr(locked_player, item_field)
+                if current_items < quantity:
+                    return {
+                        'type': 'fail',
+                        'notifications': {
+                            player.id_in_group: f'您的{item_name}不足'
+                        }
+                    }
+
+                buyer = _locked_player_by_id(player.__class__, locked_group, target_id)
+                execute_trade(locked_group, buyer, locked_player, price, quantity, item_field)
+
+                # 保留：交易成功時取消雙方其他訂單
+                cancel_player_orders(locked_group, target_id, 'buy')
+                cancel_player_orders(locked_group, locked_player.id_in_group, 'sell')
+
+                # 移除已成交的訂單
+                buy_orders, sell_orders = parse_orders(locked_group)
+                buy_orders = [o for o in buy_orders if not (
+                    int(o[0]) == target_id and
+                    float(o[1]) == price and
+                    int(o[2]) == quantity
+                )]
+                save_orders(locked_group, buy_orders, sell_orders)
+                _persist_trade_models(locked_group, buyer, locked_player)
+
+                return {
+                    'type': 'trade_executed',
+                    'update_all': True,
+                    'notifications': {
+                        player.id_in_group: f'交易成功：您以價格 {price} 賣出了 {quantity} 個{item_name}',
+                        target_id: f'交易成功：您以價格 {price} 買入了 {quantity} 個{item_name}'
+                    }
                 }
-            }
-            
+
     except Exception as e:
         print(f"接受訂單失敗: {e}")
         return {
