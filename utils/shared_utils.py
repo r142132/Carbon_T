@@ -15,6 +15,24 @@ from configs.config import config, ConfigConstants
 
 CommonConstants = ConfigConstants
 
+def _build_control_parameter_order(num_sets: int, total_rounds: int) -> List[int]:
+    """
+    控制組專用：
+    先讓每種參數至少出現一次，再把剩餘回合隨機補上。
+    例如 num_sets=4, total_rounds=6 -> 先放4種各一次，再隨機補2個。
+    """
+    if total_rounds < num_sets:
+        raise ValueError(
+            f"Control rounds ({total_rounds}) cannot be smaller than number of control parameter sets ({num_sets})."
+        )
+
+    base_order = random.sample(range(num_sets), num_sets)   # 每種先各一次
+    extra_needed = total_rounds - num_sets
+    extra_order = random.choices(range(num_sets), k=extra_needed) if extra_needed > 0 else []
+
+    full_order = base_order + extra_order
+    return full_order
+
 def get_parameter_set_for_round(
     session: Any,
     round_number: int,
@@ -34,12 +52,37 @@ def get_parameter_set_for_round(
     Returns:
         Dict[str, Any]: 對應本回合的參數設定
     """
-    all_sets = config.parameter_sets
-    num_sets = len(all_sets)
-
     # 每個 stage_key 單獨儲存一組隨機順序，避免不同階段使用相同排序
     stage_identifier = stage_key or 'default'
     parameter_orders = session.vars.setdefault('parameter_orders', {})
+    
+    # ===== 控制組專用邏輯 =====
+    if stage_identifier == 'control':
+        all_sets = config.control_parameter_sets
+        num_sets = len(all_sets)
+        total_rounds = config.num_rounds
+
+        if (
+            stage_identifier not in parameter_orders
+            or len(parameter_orders.get(stage_identifier, [])) != total_rounds
+        ):
+            parameter_orders[stage_identifier] = _build_control_parameter_order(
+                num_sets=num_sets,
+                total_rounds=total_rounds
+            )
+
+        order = parameter_orders[stage_identifier]
+        if round_number < 1 or round_number > len(order):
+            raise ValueError(
+                f"Invalid round_number {round_number}: must be between 1 and {len(order)}"
+            )
+
+        param_index = order[round_number - 1]
+        return all_sets[param_index]
+
+    # ===== 其他 stage 維持原本邏輯 =====
+    all_sets = config.parameter_sets
+    num_sets = len(all_sets)
 
     if (
         stage_identifier not in parameter_orders

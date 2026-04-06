@@ -23,6 +23,11 @@ class Player(BasePlayer):
         label='請問您的性別為何？',
         widget=widgets.RadioSelectHorizontal
     )
+    background = models.StringField(
+        label='請問您的最高學歷為？',
+        choices=['高中(職)以下',  '專科', '大學','碩士','博士'],
+        widget=widgets.RadioSelectHorizontal
+    )
     econ_or_bz = models.IntegerField(
         label='請問您是否有「經濟或商管」領域相關知識？',
         choices=[[1, '是'], [0, '否']],
@@ -54,18 +59,19 @@ class Player(BasePlayer):
     )
 
     # carbon_trade 專屬題目
-    carbon_trade_fairness = models.IntegerField(
-        label='請問您認為第二部分碳權交易制度在「公平性」方面的表現如何？',
-        choices=[[1, '非常不公平'], [2, '不太公平'], [3, '普通'], [4, '公平'], [5, '非常公平']],
+    carbon_trade_efficiency = models.StringField(
+        label='請問在第二部分碳權交易制度中，在「經濟效率」的考量下，您較傾向哪一種碳權分配方式？（經濟效率：指您「認為」資源最後是不是被適當分配，讓資源被利用得最有效）',
+        choices=['非常傾向平均分配',  '傾向平均分配', '無特別傾向，兩者差不多','傾向大廠商獲得較多碳權','非常傾向大廠商獲得較多碳權'],
         widget=widgets.RadioSelectHorizontal
     )
-    carbon_trade_efficiency = models.IntegerField(
-        label='請問您認為第二部分碳權交易制度在「經濟效率」方面的表現如何？',
-        choices=[[1, '非常沒效率'], [2, '沒效率'], [3, '普通'], [4, '有效率'], [5, '非常有效率']],
+
+    carbon_trade_fairness = models.StringField(
+        label='請問在第二部分碳權交易制度中，在「公平性」的考量下，您較傾向哪一種碳權分配方式？（公平性：指資源有合理分配，沒有特別偏向某些人）',
+        choices=['非常傾向平均分配',  '傾向平均分配', '無特別傾向，兩者差不多','傾向大廠商獲得較多碳權','非常傾向大廠商獲得較多碳權'],
         widget=widgets.RadioSelectHorizontal
     )
     carbon_trade_environment = models.IntegerField(
-        label='請問您認為第二部分碳權交易制度在「減碳／改善環境」方面的效果',
+        label='請問您認為第二部分碳權交易制度在「減碳／改善環境」方面的效果:',
         choices=[[1, '完全沒幫助'], [2, '幫助很小'], [3, '普通'], [4, '有幫助'], [5, '非常有效']],
         widget=widgets.RadioSelectHorizontal
     )
@@ -129,7 +135,7 @@ class Survey(Page):
     @staticmethod
     def get_form_fields(player):
         return [
-            'age', 'male', 'econ_or_bz', 'env',
+            'age', 'male', 'background','econ_or_bz', 'env',
             'main_goal', 'respond_to_high_others',
             'carbon_trade_fairness', 'carbon_trade_efficiency', 'carbon_trade_environment',
             'carbon_trade_mkt_power',
