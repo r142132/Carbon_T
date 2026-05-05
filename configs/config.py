@@ -160,6 +160,14 @@ class ExperimentConfig:
         return [dict(zip(columns, row)) for row in values]
 
     @property
+    def control_parameter_sets(self) -> List[Dict[str, Any]]:
+        """從矩陣格式的 control_parameter_matrix 轉換成 list of dicts"""
+        matrix = self._config.get('control_parameter_matrix', {})
+        columns = matrix.get('columns', [])
+        values = matrix.get('values', [])
+        return [dict(zip(columns, row)) for row in values]
+
+    @property
     def dominant_mc_range(self) -> Tuple[int, int]:
         """主導廠商邊際成本係數範圍"""
         return tuple(self.get('general.dominant_firm.mc_range', [1, 5]))

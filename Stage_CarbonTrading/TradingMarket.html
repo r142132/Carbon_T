@@ -45,6 +45,18 @@
                         <li class="list-group-item">碳權持有：<b id="permits">{{ permits }}</b></li>
                         <li class="list-group-item">單位碳排放：<b>{{ carbon_emission_per_unit|to0 }}</b></li>
                         <li class="list-group-item">市場價格：<b>{{ market_price }}</b></li>
+                        <li class="list-group-item">
+                            您本單位的碳權價值：
+                            <b id="current-permit-mv">{{ current_permit_mv }}</b>
+                        </li>
+                        <li class="list-group-item">
+                            您再多持有一單位，此單位的碳權價值：
+                            <b id="next-permit-mv">{{ next_permit_mv }}</b>
+                        </li>
+                        <li class="list-group-item">
+                            您再多持有兩單位，第二單位的碳權價值：
+                            <b id="next2-permit-mv">{{ next2_permit_mv }}</b>
+                        </li>
                     </ul>
                 </div>
             </div>
@@ -604,7 +616,17 @@ function updateMarket(data) {
         // 更新顯示可用資源 (總資源減去已保留的)
         document.getElementById('cash').innerText = data.cash;
         document.getElementById('permits').innerText = data.permits;
-        
+
+        if (document.getElementById('current-permit-mv')) {
+            document.getElementById('current-permit-mv').innerText = data.current_permit_mv;
+        }
+        if (document.getElementById('next-permit-mv')) {
+            document.getElementById('next-permit-mv').innerText = data.next_permit_mv;
+        }
+        if (document.getElementById('next2-permit-mv')) {
+            document.getElementById('next2-permit-mv').innerText = data.next2_permit_mv;
+        }
+                
         // 賣單保留量顯示已移除 - 因為賣單邏輯改為無限制掛單
 
         updateSellButtonState();
@@ -1199,7 +1221,18 @@ function processOtreeResponse(data) {
         if (playerData.permits !== undefined) {
             document.getElementById('permits').innerText = playerData.permits;
         }
-        
+                // 0505 新增：即時更新碳權邊際價值
+        if (playerData.current_permit_mv !== undefined) {
+            document.getElementById('current-permit-mv').innerText = playerData.current_permit_mv;
+        }
+
+        if (playerData.next_permit_mv !== undefined) {
+            document.getElementById('next-permit-mv').innerText = playerData.next_permit_mv;
+        }
+
+        if (playerData.next2_permit_mv !== undefined) {
+            document.getElementById('next2-permit-mv').innerText = playerData.next2_permit_mv;
+        }
         // 更新交易歷史
         if (playerData.trade_history) {
             log(`更新交易歷史: ${JSON.stringify(playerData.trade_history).slice(0,200)}...`);
