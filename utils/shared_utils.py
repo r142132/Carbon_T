@@ -28,8 +28,8 @@ def _build_control_parameter_order(num_sets: int, total_rounds: int) -> List[int
 
     base_order = random.sample(range(num_sets), num_sets)   # 每種先各一次
     extra_needed = total_rounds - num_sets
-    extra_order = random.choices(range(num_sets), k=extra_needed) if extra_needed > 0 else []
-
+    #extra_order = random.choices(range(num_sets), k=extra_needed) if extra_needed > 0 else [] #C4取一x2
+    extra_order = random.sample(range(num_sets), k=extra_needed) if extra_needed > 0 else [] #C4取2
     full_order = base_order + extra_order
     return full_order
 
