@@ -876,7 +876,7 @@ class ResultsWaitPage(WaitPage):
     @staticmethod
     def after_all_players_arrive(group):
         # 先計算一般payoff
-        calculate_general_payoff(group, use_trading=True)
+        calculate_general_payoff(group, tax_rate=group.subsession.tax_rate, use_trading=True)
         
         # 然後記錄每個player的實際排放量和組總排放量
         group_total_emission = 0
